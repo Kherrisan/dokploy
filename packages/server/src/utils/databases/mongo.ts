@@ -1,5 +1,6 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
+import { resolveServiceNetworks } from "../../services/network";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -9,13 +10,15 @@ import {
 	prepareEnvironmentVariables,
 } from "../docker/utils";
 import { getRemoteDocker } from "../servers/remote-docker";
+import { withResolvedVaultRefs } from "../vault";
 
 export type MongoNested = InferResultType<
 	"mongo",
 	{ mounts: true; environment: { with: { project: true } } }
 >;
 
-export const buildMongo = async (mongo: MongoNested) => {
+export const buildMongo = async (rawMongo: MongoNested) => {
+	const mongo = await withResolvedVaultRefs(rawMongo);
 	const {
 		appName,
 		env,
@@ -28,6 +31,7 @@ export const buildMongo = async (mongo: MongoNested) => {
 		databaseUser,
 		databasePassword,
 		command,
+		args,
 		mounts,
 		replicaSets,
 	} = mongo;
@@ -53,7 +57,7 @@ if [ "$REPLICA_STATUS" != "1" ]; then
 	mongosh --eval '
 	rs.initiate({
 		_id: "rs0",
-		members: [{ _id: 0, host: "localhost:27017", priority: 1 }]
+		members: [{ _id: 0, host: "${appName}:27017", priority: 1 }]
 	});
 
     // Wait for the replica set to initialize
@@ -82,6 +86,8 @@ ${command ?? "wait $MONGOD_PID"}`;
 		env ? `\n${env}` : ""
 	}`;
 
+	const resolvedNetworks = await resolveServiceNetworks(mongo);
+
 	const {
 		HealthCheck,
 		RestartPolicy,
@@ -90,9 +96,9 @@ ${command ?? "wait $MONGOD_PID"}`;
 		Mode,
 		RollbackConfig,
 		UpdateConfig,
-		Networks,
 		StopGracePeriod,
 		EndpointSpec,
+		Ulimits,
 	} = generateConfigContainer(mongo);
 
 	const resources = calculateResources({
@@ -121,21 +127,27 @@ ${command ?? "wait $MONGOD_PID"}`;
 				Image: dockerImage,
 				Env: envVariables,
 				Mounts: [...volumesMount, ...bindsMount, ...filesMount],
-				...(StopGracePeriod && { StopGracePeriod }),
+				...(StopGracePeriod !== null &&
+					StopGracePeriod !== undefined && { StopGracePeriod }),
 				...(replicaSets
 					? {
 							Command: ["/bin/bash"],
 							Args: ["-c", startupScript],
 						}
-					: {
-							...(command && {
-								Command: ["/bin/bash"],
-								Args: ["-c", command],
-							}),
-						}),
+					: {}),
+				...(command &&
+					!replicaSets && {
+						Command: command.split(" "),
+					}),
+				...(args &&
+					args.length > 0 &&
+					!replicaSets && {
+						Args: args,
+					}),
+				...(Ulimits && { Ulimits }),
 				Labels,
 			},
-			Networks,
+			Networks: resolvedNetworks,
 			RestartPolicy,
 			Placement,
 			Resources: {
@@ -159,7 +171,11 @@ ${command ?? "wait $MONGOD_PID"}`;
 							]
 						: [],
 				},
-		UpdateConfig,
+		UpdateConfig: mongo.updateConfigSwarm ?? {
+			Parallelism: 1,
+			Order: "stop-first" as const,
+			FailureAction: "rollback" as const,
+		},
 	};
 
 	try {

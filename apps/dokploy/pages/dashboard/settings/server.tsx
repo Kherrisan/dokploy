@@ -10,13 +10,12 @@ import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { Card } from "@/components/ui/card";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
-import { getLocale, serverSideTranslations } from "@/utils/i18n";
 
 const Page = () => {
 	const { data: user } = api.user.get.useQuery();
 	return (
 		<div className="w-full">
-			<div className="h-full rounded-xl  max-w-5xl mx-auto flex flex-col gap-4">
+			<div className="h-full rounded-xl w-full flex flex-col gap-4">
 				<WebDomain />
 				<WebServer />
 				<div className="w-full flex flex-col gap-4">
@@ -42,12 +41,11 @@ export async function getServerSideProps(
 	ctx: GetServerSidePropsContext<{ serviceId: string }>,
 ) {
 	const { req, res } = ctx;
-	const locale = await getLocale(req.cookies);
 	if (IS_CLOUD) {
 		return {
 			redirect: {
-				permanent: true,
-				destination: "/dashboard/projects",
+				permanent: false,
+				destination: "/dashboard/home",
 			},
 		};
 	}
@@ -55,7 +53,7 @@ export async function getServerSideProps(
 	if (!user) {
 		return {
 			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/",
 			},
 		};
@@ -63,7 +61,7 @@ export async function getServerSideProps(
 	if (user.role === "member") {
 		return {
 			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/dashboard/settings/profile",
 			},
 		};
@@ -85,7 +83,6 @@ export async function getServerSideProps(
 	return {
 		props: {
 			trpcState: helpers.dehydrate(),
-			...(await serverSideTranslations(locale, ["settings"])),
 		},
 	};
 }

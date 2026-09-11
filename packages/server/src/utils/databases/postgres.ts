@@ -1,5 +1,6 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
+import { resolveServiceNetworks } from "../../services/network";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -9,12 +10,14 @@ import {
 	prepareEnvironmentVariables,
 } from "../docker/utils";
 import { getRemoteDocker } from "../servers/remote-docker";
+import { withResolvedVaultRefs } from "../vault";
 
 export type PostgresNested = InferResultType<
 	"postgres",
 	{ mounts: true; environment: { with: { project: true } } }
 >;
-export const buildPostgres = async (postgres: PostgresNested) => {
+export const buildPostgres = async (rawPostgres: PostgresNested) => {
+	const postgres = await withResolvedVaultRefs(rawPostgres);
 	const {
 		appName,
 		env,
@@ -28,12 +31,15 @@ export const buildPostgres = async (postgres: PostgresNested) => {
 		databaseUser,
 		databasePassword,
 		command,
+		args,
 		mounts,
 	} = postgres;
 
 	const defaultPostgresEnv = `POSTGRES_DB="${databaseName}"\nPOSTGRES_USER="${databaseUser}"\nPOSTGRES_PASSWORD="${databasePassword}"${
 		env ? `\n${env}` : ""
 	}`;
+
+	const resolvedNetworks = await resolveServiceNetworks(postgres);
 
 	const {
 		HealthCheck,
@@ -43,9 +49,9 @@ export const buildPostgres = async (postgres: PostgresNested) => {
 		Mode,
 		RollbackConfig,
 		UpdateConfig,
-		Networks,
 		StopGracePeriod,
 		EndpointSpec,
+		Ulimits,
 	} = generateConfigContainer(postgres);
 	const resources = calculateResources({
 		memoryLimit,
@@ -72,16 +78,18 @@ export const buildPostgres = async (postgres: PostgresNested) => {
 				Image: dockerImage,
 				Env: envVariables,
 				Mounts: [...volumesMount, ...bindsMount, ...filesMount],
-				...(StopGracePeriod && { StopGracePeriod }),
-				...(command
-					? {
-							Command: ["/bin/sh"],
-							Args: ["-c", command],
-						}
-					: {}),
+				StopGracePeriod: StopGracePeriod ?? 30_000_000_000,
+				...(command && {
+					Command: command.split(" "),
+				}),
+				...(args &&
+					args.length > 0 && {
+						Args: args,
+					}),
+				...(Ulimits && { Ulimits }),
 				Labels,
 			},
-			Networks,
+			Networks: resolvedNetworks,
 			RestartPolicy,
 			Placement,
 			Resources: {
@@ -105,7 +113,11 @@ export const buildPostgres = async (postgres: PostgresNested) => {
 							]
 						: [],
 				},
-		UpdateConfig,
+		UpdateConfig: postgres.updateConfigSwarm ?? {
+			Parallelism: 1,
+			Order: "stop-first" as const,
+			FailureAction: "rollback" as const,
+		},
 	};
 	try {
 		const service = docker.getService(appName);

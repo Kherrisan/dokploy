@@ -33,14 +33,39 @@ export const registry = pgTable("registry", {
 });
 
 export const registryRelations = relations(registry, ({ many }) => ({
-	applications: many(applications),
+	applications: many(applications, {
+		relationName: "applicationRegistry",
+	}),
+	buildApplications: many(applications, {
+		relationName: "applicationBuildRegistry",
+	}),
+	rollbackApplications: many(applications, {
+		relationName: "applicationRollbackRegistry",
+	}),
 }));
+
+// Registry usernames should NOT be lowercased.
+// Some registries (e.g. AWS ECR) require a specific case: the username must be
+// exactly "AWS" (uppercase) for ECR authentication. Docker Hub usernames are
+// case-insensitive for login, so preserving case is safe for all providers.
+const registryUsernameSchema = z.string().trim().min(1);
+
+// Registry URLs must be hostname[:port] only — no shell metacharacters
+// Empty string is allowed (means default/Docker Hub registry)
+const registryUrlSchema = z
+	.string()
+	.refine(
+		(val) =>
+			val === "" ||
+			/^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?(:\d{1,5})?$/.test(val),
+		"Registry URL must be a valid hostname or hostname:port (e.g. registry.example.com or localhost:5000)",
+	);
 
 const createSchema = createInsertSchema(registry, {
 	registryName: z.string().min(1),
-	username: z.string().min(1),
+	username: registryUsernameSchema,
 	password: z.string().min(1),
-	registryUrl: z.string(),
+	registryUrl: registryUrlSchema,
 	organizationId: z.string().min(1),
 	registryId: z.string().min(1),
 	registryType: z.enum(["cloud"]),
@@ -51,9 +76,9 @@ export const apiCreateRegistry = createSchema
 	.pick({})
 	.extend({
 		registryName: z.string().min(1),
-		username: z.string().min(1),
+		username: registryUsernameSchema,
 		password: z.string().min(1),
-		registryUrl: z.string(),
+		registryUrl: registryUrlSchema,
 		registryType: z.enum(["cloud"]),
 		imagePrefix: z.string().nullable().optional(),
 	})
@@ -64,13 +89,21 @@ export const apiCreateRegistry = createSchema
 
 export const apiTestRegistry = createSchema.pick({}).extend({
 	registryName: z.string().optional(),
-	username: z.string().min(1),
+	username: registryUsernameSchema,
 	password: z.string().min(1),
-	registryUrl: z.string(),
+	registryUrl: registryUrlSchema,
 	registryType: z.enum(["cloud"]),
 	imagePrefix: z.string().nullable().optional(),
 	serverId: z.string().optional(),
 });
+
+export const apiTestRegistryById = createSchema
+	.pick({
+		registryId: true,
+	})
+	.extend({
+		serverId: z.string().optional(),
+	});
 
 export const apiRemoveRegistry = createSchema
 	.pick({
@@ -78,11 +111,9 @@ export const apiRemoveRegistry = createSchema
 	})
 	.required();
 
-export const apiFindOneRegistry = createSchema
-	.pick({
-		registryId: true,
-	})
-	.required();
+export const apiFindOneRegistry = z.object({
+	registryId: z.string().min(1),
+});
 
 export const apiUpdateRegistry = createSchema.partial().extend({
 	registryId: z.string().min(1),

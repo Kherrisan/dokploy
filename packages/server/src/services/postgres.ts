@@ -7,10 +7,15 @@ import {
 } from "@dokploy/server/db/schema";
 import { generatePassword } from "@dokploy/server/templates";
 import { buildPostgres } from "@dokploy/server/utils/databases/postgres";
-import { pullImage } from "@dokploy/server/utils/docker/utils";
+import {
+	pullImage,
+	waitForSwarmServiceConvergence,
+} from "@dokploy/server/utils/docker/utils";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { TRPCError } from "@trpc/server";
 import { eq, getTableColumns } from "drizzle-orm";
+import { quote } from "shell-quote";
+import type { z } from "zod";
 import { validUniqueServerAppName } from "./project";
 
 export function getMountPath(dockerImage: string): string {
@@ -19,7 +24,8 @@ export function getMountPath(dockerImage: string): string {
 	if (versionMatch?.[1]) {
 		const version = Number.parseInt(versionMatch[1], 10);
 		if (version >= 18) {
-			return `/var/lib/postgresql/${version}/data`;
+			// PostgreSQL 18+ uses /var/lib/postgresql/{version}/docker as the default PGDATA
+			return `/var/lib/postgresql/${version}/docker`;
 		}
 	}
 	return "/var/lib/postgresql/data";
@@ -27,7 +33,9 @@ export function getMountPath(dockerImage: string): string {
 
 export type Postgres = typeof postgres.$inferSelect;
 
-export const createPostgres = async (input: typeof apiCreatePostgres._type) => {
+export const createPostgres = async (
+	input: z.infer<typeof apiCreatePostgres>,
+) => {
 	const appName = buildAppName("postgres", input.appName);
 
 	const valid = await validUniqueServerAppName(appName);
@@ -72,7 +80,12 @@ export const findPostgresById = async (postgresId: string) => {
 			server: true,
 			backups: {
 				with: {
-					destination: true,
+					destination: {
+						columns: {
+							accessKey: false,
+							secretAccessKey: false,
+						},
+					},
 					deployments: true,
 				},
 			},
@@ -146,7 +159,7 @@ export const deployPostgres = async (
 		if (postgres.serverId) {
 			await execAsyncRemote(
 				postgres.serverId,
-				`docker pull ${postgres.dockerImage}`,
+				`docker pull ${quote([postgres.dockerImage])}`,
 				onData,
 			);
 		} else {
@@ -154,6 +167,8 @@ export const deployPostgres = async (
 		}
 
 		await buildPostgres(postgres);
+
+		await waitForSwarmServiceConvergence(postgres.appName, postgres.serverId);
 
 		await updatePostgresById(postgresId, {
 			applicationStatus: "done",

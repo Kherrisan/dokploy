@@ -1,8 +1,21 @@
+import {
+	INVALID_HOSTNAME_MESSAGE,
+	VALID_HOSTNAME_REGEX,
+} from "@dokploy/server/utils/hostname-validation";
 import { z } from "zod";
 
 export const domain = z
 	.object({
-		host: z.string().min(1, { message: "Add a hostname" }),
+		host: z
+			.string()
+			.min(1, { message: "Add a hostname" })
+			.refine((val) => val === val.trim(), {
+				message: "Domain name cannot have leading or trailing spaces",
+			})
+			.transform((val) => val.trim())
+			.refine((val) => VALID_HOSTNAME_REGEX.test(val), {
+				message: INVALID_HOSTNAME_MESSAGE,
+			}),
 		path: z.string().min(1).optional(),
 		port: z
 			.number()
@@ -33,7 +46,16 @@ export const domain = z
 
 export const domainCompose = z
 	.object({
-		host: z.string().min(1, { message: "Host is required" }),
+		host: z
+			.string()
+			.min(1, { message: "Add a hostname" })
+			.refine((val) => val === val.trim(), {
+				message: "Domain name cannot have leading or trailing spaces",
+			})
+			.transform((val) => val.trim())
+			.refine((val) => VALID_HOSTNAME_REGEX.test(val), {
+				message: INVALID_HOSTNAME_MESSAGE,
+			}),
 		path: z.string().min(1).optional(),
 		port: z
 			.number()

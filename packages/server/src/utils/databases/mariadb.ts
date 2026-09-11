@@ -1,5 +1,6 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
+import { resolveServiceNetworks } from "../../services/network";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -9,12 +10,14 @@ import {
 	prepareEnvironmentVariables,
 } from "../docker/utils";
 import { getRemoteDocker } from "../servers/remote-docker";
+import { withResolvedVaultRefs } from "../vault";
 
 export type MariadbNested = InferResultType<
 	"mariadb",
 	{ mounts: true; environment: { with: { project: true } } }
 >;
-export const buildMariadb = async (mariadb: MariadbNested) => {
+export const buildMariadb = async (rawMariadb: MariadbNested) => {
+	const mariadb = await withResolvedVaultRefs(rawMariadb);
 	const {
 		appName,
 		env,
@@ -29,12 +32,15 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 		cpuLimit,
 		cpuReservation,
 		command,
+		args,
 		mounts,
 	} = mariadb;
 
 	const defaultMariadbEnv = `MARIADB_DATABASE="${databaseName}"\nMARIADB_USER="${databaseUser}"\nMARIADB_PASSWORD="${databasePassword}"\nMARIADB_ROOT_PASSWORD="${databaseRootPassword}"${
 		env ? `\n${env}` : ""
 	}`;
+
+	const resolvedNetworks = await resolveServiceNetworks(mariadb);
 
 	const {
 		HealthCheck,
@@ -44,9 +50,9 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 		Mode,
 		RollbackConfig,
 		UpdateConfig,
-		Networks,
 		StopGracePeriod,
 		EndpointSpec,
+		Ulimits,
 	} = generateConfigContainer(mariadb);
 	const resources = calculateResources({
 		memoryLimit,
@@ -73,16 +79,19 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 				Image: dockerImage,
 				Env: envVariables,
 				Mounts: [...volumesMount, ...bindsMount, ...filesMount],
-				...(StopGracePeriod && { StopGracePeriod }),
-				...(command
-					? {
-							Command: ["/bin/sh"],
-							Args: ["-c", command],
-						}
-					: {}),
+				...(StopGracePeriod !== null &&
+					StopGracePeriod !== undefined && { StopGracePeriod }),
+				...(command && {
+					Command: command.split(" "),
+				}),
+				...(args &&
+					args.length > 0 && {
+						Args: args,
+					}),
+				...(Ulimits && { Ulimits }),
 				Labels,
 			},
-			Networks,
+			Networks: resolvedNetworks,
 			RestartPolicy,
 			Placement,
 			Resources: {
@@ -106,7 +115,11 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 							]
 						: [],
 				},
-		UpdateConfig,
+		UpdateConfig: mariadb.updateConfigSwarm ?? {
+			Parallelism: 1,
+			Order: "stop-first" as const,
+			FailureAction: "rollback" as const,
+		},
 	};
 	try {
 		const service = docker.getService(appName);

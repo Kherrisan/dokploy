@@ -1,9 +1,16 @@
 import type http from "node:http";
-import { findServerById, validateRequest } from "@dokploy/server";
+import { findServerById, IS_CLOUD, validateRequest } from "@dokploy/server";
 import { spawn } from "node-pty";
 import { Client } from "ssh2";
 import { WebSocketServer } from "ws";
-import { getShell } from "./utils";
+import { canAccessDockerOverWss } from "./authorize";
+import {
+	getShell,
+	isValidContainerId,
+	isValidSearch,
+	isValidSince,
+	isValidTail,
+} from "./utils";
 
 export const setupDockerContainerLogsWebSocketServer = (
 	server: http.Server<typeof http.IncomingMessage, typeof http.ServerResponse>,
@@ -30,11 +37,12 @@ export const setupDockerContainerLogsWebSocketServer = (
 	wssTerm.on("connection", async (ws, req) => {
 		const url = new URL(req.url || "", `http://${req.headers.host}`);
 		const containerId = url.searchParams.get("containerId");
-		const tail = url.searchParams.get("tail");
-		const search = url.searchParams.get("search");
-		const since = url.searchParams.get("since");
+		const tail = url.searchParams.get("tail") ?? "100";
+		const search = url.searchParams.get("search") ?? "";
+		const since = url.searchParams.get("since") ?? "all";
 		const serverId = url.searchParams.get("serverId");
 		const runType = url.searchParams.get("runType");
+		const serviceId = url.searchParams.get("serviceId");
 		const { user, session } = await validateRequest(req);
 
 		if (!containerId) {
@@ -42,13 +50,52 @@ export const setupDockerContainerLogsWebSocketServer = (
 			return;
 		}
 
+		// Security: Validate containerId to prevent command injection
+		if (!isValidContainerId(containerId)) {
+			ws.close(4000, "Invalid container ID format");
+			return;
+		}
+
+		if (!isValidTail(tail)) {
+			ws.close(4000, "Invalid tail parameter");
+			return;
+		}
+
+		if (!isValidSince(since)) {
+			ws.close(4000, "Invalid since parameter");
+			return;
+		}
+
+		if (search !== "" && !isValidSearch(search)) {
+			ws.close(4000, "Invalid search parameter");
+			return;
+		}
+
 		if (!user || !session) {
 			ws.close();
 			return;
 		}
+
+		if (!(await canAccessDockerOverWss(user, session, serverId, serviceId))) {
+			ws.close(4003, "Not authorized");
+			return;
+		}
+
+		// Set up keep-alive ping mechanism to prevent timeout
+		// Send ping every 45 seconds to keep connection alive
+		const pingInterval = setInterval(() => {
+			if (ws.readyState === ws.OPEN) {
+				ws.ping();
+			}
+		}, 45000); // 45 seconds
 		try {
 			if (serverId) {
 				const server = await findServerById(serverId);
+
+				if (server.organizationId !== session.activeOrganizationId) {
+					ws.close();
+					return;
+				}
 
 				if (!server.sshKeyId) return;
 				const client = new Client();
@@ -63,7 +110,9 @@ export const setupDockerContainerLogsWebSocketServer = (
 						const command = search
 							? `${baseCommand} 2>&1 | grep --line-buffered -iF "${escapedSearch}"`
 							: baseCommand;
-						client.exec(command, (err, stream) => {
+						// Use pty: true to ensure the remote process receives SIGHUP when SSH connection closes
+						// This is crucial for terminating docker logs processes when the connection is closed
+						client.exec(command, { pty: true }, (err, stream) => {
 							if (err) {
 								console.error("Execution error:", err);
 								ws.close();
@@ -86,6 +135,7 @@ export const setupDockerContainerLogsWebSocketServer = (
 					.on("error", (err) => {
 						console.error("SSH connection error:", err);
 						ws.send(`SSH error: ${err.message}`);
+						clearInterval(pingInterval);
 						ws.close(); // Cierra el WebSocket si hay un error con SSH
 						client.end();
 					})
@@ -96,9 +146,15 @@ export const setupDockerContainerLogsWebSocketServer = (
 						privateKey: server.sshKey?.privateKey,
 					});
 				ws.on("close", () => {
+					clearInterval(pingInterval);
 					client.end();
 				});
 			} else {
+				if (IS_CLOUD) {
+					ws.send("This feature is not available in the cloud version.");
+					ws.close();
+					return;
+				}
 				const shell = getShell();
 				const baseCommand = `docker ${runType === "swarm" ? "service" : "container"} logs --timestamps ${
 					runType === "swarm" ? "--raw" : ""
@@ -121,6 +177,7 @@ export const setupDockerContainerLogsWebSocketServer = (
 					ws.send(data);
 				});
 				ws.on("close", () => {
+					clearInterval(pingInterval);
 					ptyProcess.kill();
 				});
 				ws.on("message", (message) => {

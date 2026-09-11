@@ -1,5 +1,7 @@
-import { zodResolver } from "@hookform/resolvers/zod";
+import { standardSchemaResolver } from "@hookform/resolvers/standard-schema";
 import {
+	CheckIcon,
+	ChevronsUpDown,
 	DatabaseZap,
 	Info,
 	PenBoxIcon,
@@ -13,6 +15,14 @@ import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { CodeEditor } from "@/components/shared/code-editor";
 import { Button } from "@/components/ui/button";
+import {
+	Command,
+	CommandEmpty,
+	CommandGroup,
+	CommandInput,
+	CommandItem,
+	CommandList,
+} from "@/components/ui/command";
 import {
 	Dialog,
 	DialogContent,
@@ -32,6 +42,12 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "@/components/ui/popover";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
 	Select,
 	SelectContent,
 	SelectItem,
@@ -48,6 +64,7 @@ import {
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import type { CacheType } from "../domains/handle-domain";
+import { getTimezoneLabel, TIMEZONES } from "./timezones";
 
 export const commonCronExpressions = [
 	{ label: "Every minute", value: "* * * * *" },
@@ -63,6 +80,7 @@ export const commonCronExpressions = [
 const formSchema = z
 	.object({
 		name: z.string().min(1, "Name is required"),
+		description: z.string().optional(),
 		cronExpression: z.string().min(1, "Cron expression is required"),
 		shellType: z.enum(["bash", "sh"]).default("bash"),
 		command: z.string(),
@@ -75,6 +93,7 @@ const formSchema = z
 			"dokploy-server",
 		]),
 		script: z.string(),
+		timezone: z.string().optional(),
 	})
 	.superRefine((data, ctx) => {
 		if (data.scheduleType === "compose" && !data.serviceName) {
@@ -202,10 +221,11 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
 	const [cacheType, setCacheType] = useState<CacheType>("cache");
 	const utils = api.useUtils();
-	const form = useForm<z.infer<typeof formSchema>>({
-		resolver: zodResolver(formSchema),
+	const form = useForm({
+		resolver: standardSchemaResolver(formSchema),
 		defaultValues: {
 			name: "",
+			description: "",
 			cronExpression: "",
 			shellType: "bash",
 			command: "",
@@ -213,6 +233,7 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 			serviceName: "",
 			scheduleType: scheduleType || "application",
 			script: "",
+			timezone: undefined,
 		},
 	});
 
@@ -244,6 +265,7 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 		if (scheduleId && schedule) {
 			form.reset({
 				name: schedule.name,
+				description: schedule.description || "",
 				cronExpression: schedule.cronExpression,
 				shellType: schedule.shellType,
 				command: schedule.command,
@@ -251,15 +273,16 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 				serviceName: schedule.serviceName || "",
 				scheduleType: schedule.scheduleType,
 				script: schedule.script || "",
+				timezone: schedule.timezone || undefined,
 			});
 		}
 	}, [form, schedule, scheduleId]);
 
-	const { mutateAsync, isLoading } = scheduleId
+	const { mutateAsync, isPending } = scheduleId
 		? api.schedule.update.useMutation()
 		: api.schedule.create.useMutation();
 
-	const onSubmit = async (values: z.infer<typeof formSchema>) => {
+	const onSubmit = async (values: z.output<typeof formSchema>) => {
 		if (!id && !scheduleId) return;
 
 		await mutateAsync({
@@ -332,10 +355,7 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 						{scheduleTypeForm === "compose" && (
 							<div className="flex flex-col w-full gap-4">
 								{errorServices && (
-									<AlertBlock
-										type="warning"
-										className="[overflow-wrap:anywhere]"
-									>
+									<AlertBlock type="warning" className="wrap-anywhere">
 										{errorServices?.message}
 									</AlertBlock>
 								)}
@@ -391,7 +411,7 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 														<TooltipContent
 															side="left"
 															sideOffset={5}
-															className="max-w-[10rem]"
+															className="max-w-40"
 														>
 															<p>
 																Fetch: Will clone the repository and load the
@@ -421,7 +441,7 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 														<TooltipContent
 															side="left"
 															sideOffset={5}
-															className="max-w-[10rem]"
+															className="max-w-40"
 														>
 															<p>
 																Cache: If you previously deployed this compose,
@@ -459,9 +479,112 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 							)}
 						/>
 
+						<FormField
+							control={form.control}
+							name="description"
+							render={({ field }) => (
+								<FormItem>
+									<FormLabel>Description</FormLabel>
+									<FormControl>
+										<Input
+											placeholder="Backs up the database every day at midnight"
+											{...field}
+										/>
+									</FormControl>
+									<FormDescription>
+										Optional description of what this schedule does
+									</FormDescription>
+									<FormMessage />
+								</FormItem>
+							)}
+						/>
+
 						<ScheduleFormField
 							name="cronExpression"
 							formControl={form.control}
+						/>
+
+						<FormField
+							control={form.control}
+							name="timezone"
+							render={({ field }) => (
+								<FormItem>
+									<FormLabel className="flex items-center gap-2">
+										Timezone
+										<TooltipProvider>
+											<Tooltip>
+												<TooltipTrigger asChild>
+													<Info className="w-4 h-4 text-muted-foreground cursor-help" />
+												</TooltipTrigger>
+												<TooltipContent>
+													<p>
+														Select a timezone for the schedule. If not
+														specified, UTC will be used.
+													</p>
+												</TooltipContent>
+											</Tooltip>
+										</TooltipProvider>
+									</FormLabel>
+									<Popover>
+										<PopoverTrigger asChild>
+											<FormControl>
+												<Button
+													variant="outline"
+													className={cn(
+														"w-full justify-between",
+														!field.value && "text-muted-foreground",
+													)}
+												>
+													{getTimezoneLabel(field.value)}
+													<ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+												</Button>
+											</FormControl>
+										</PopoverTrigger>
+										<PopoverContent className="w-[400px] p-0" align="start">
+											<Command>
+												<CommandInput
+													placeholder="Search timezone..."
+													className="h-9"
+												/>
+												<CommandList>
+													<CommandEmpty>No timezone found.</CommandEmpty>
+													<ScrollArea className="h-72">
+														{Object.entries(TIMEZONES).map(
+															([region, zones]) => (
+																<CommandGroup key={region} heading={region}>
+																	{zones.map((tz) => (
+																		<CommandItem
+																			key={tz.value}
+																			value={`${region} ${tz.label} ${tz.value}`}
+																			onSelect={() => {
+																				field.onChange(tz.value);
+																			}}
+																		>
+																			{tz.value}
+																			<CheckIcon
+																				className={cn(
+																					"ml-auto h-4 w-4",
+																					field.value === tz.value
+																						? "opacity-100"
+																						: "opacity-0",
+																				)}
+																			/>
+																		</CommandItem>
+																	))}
+																</CommandGroup>
+															),
+														)}
+													</ScrollArea>
+												</CommandList>
+											</Command>
+										</PopoverContent>
+									</Popover>
+									<FormDescription>
+										Optional: Choose a timezone for the schedule execution time
+									</FormDescription>
+									<FormMessage />
+								</FormItem>
+							)}
 						/>
 
 						{(scheduleTypeForm === "application" ||
@@ -559,7 +682,7 @@ echo "Hello, world!"
 							)}
 						/>
 
-						<Button type="submit" isLoading={isLoading} className="w-full">
+						<Button type="submit" isLoading={isPending} className="w-full">
 							{scheduleId ? "Update" : "Create"} Schedule
 						</Button>
 					</form>

@@ -23,17 +23,17 @@ export async function getServerSideProps(
 	if (!IS_CLOUD) {
 		return {
 			redirect: {
-				permanent: true,
-				destination: "/dashboard/projects",
+				permanent: false,
+				destination: "/dashboard/home",
 			},
 		};
 	}
 	const { req, res } = ctx;
 	const { user, session } = await validateRequest(req);
-	if (!user || user.role === "member") {
+	if (!user || user.role !== "owner") {
 		return {
 			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/",
 			},
 		};

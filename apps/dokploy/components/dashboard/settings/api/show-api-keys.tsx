@@ -17,12 +17,12 @@ import { AddApiKey } from "./add-api-key";
 
 export const ShowApiKeys = () => {
 	const { data, refetch } = api.user.get.useQuery();
-	const { mutateAsync: deleteApiKey, isLoading: isLoadingDelete } =
+	const { mutateAsync: deleteApiKey, isPending: isLoadingDelete } =
 		api.user.deleteApiKey.useMutation();
 
 	return (
 		<div className="w-full">
-			<Card className="h-full bg-sidebar p-2.5 rounded-xl max-w-5xl mx-auto">
+			<Card className="h-full bg-sidebar p-2.5 rounded-xl w-full">
 				<div className="rounded-xl bg-background shadow-md">
 					<CardHeader className="flex flex-row gap-2 flex-wrap justify-between items-center">
 						<div>

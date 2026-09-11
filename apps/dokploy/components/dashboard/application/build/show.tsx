@@ -1,6 +1,6 @@
-import { zodResolver } from "@hookform/resolvers/zod";
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
 import { Cog } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -20,7 +20,87 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/utils/api";
+
+// Railpack versions from https://github.com/railwayapp/railpack/releases
+export const RAILPACK_VERSIONS = [
+	"0.39.0",
+	"0.38.0",
+	"0.37.1",
+	"0.37.0",
+	"0.36.4",
+	"0.36.3",
+	"0.36.2",
+	"0.36.1",
+	"0.36.0",
+	"0.35.0",
+	"0.34.0",
+	"0.33.0",
+	"0.32.0",
+	"0.31.2",
+	"0.31.1",
+	"0.31.0",
+	"0.30.1",
+	"0.30.0",
+	"0.29.0",
+	"0.28.0",
+	"0.27.2",
+	"0.27.1",
+	"0.27.0",
+	"0.26.1",
+	"0.26.0",
+	"0.25.0",
+	"0.24.0",
+	"0.23.0",
+	"0.22.2",
+	"0.22.1",
+	"0.22.0",
+	"0.21.0",
+	"0.20.0",
+	"0.19.0",
+	"0.18.0",
+	"0.17.2",
+	"0.17.1",
+	"0.17.0",
+	"0.16.0",
+	"0.15.4",
+	"0.15.3",
+	"0.15.2",
+	"0.15.1",
+	"0.15.0",
+	"0.14.0",
+	"0.13.0",
+	"0.12.0",
+	"0.11.0",
+	"0.10.0",
+	"0.9.2",
+	"0.9.1",
+	"0.9.0",
+	"0.8.0",
+	"0.7.2",
+	"0.7.1",
+	"0.7.0",
+	"0.6.1",
+	"0.6.0",
+	"0.5.1",
+	"0.5.0",
+	"0.4.0",
+	"0.3.0",
+	"0.2.3",
+	"0.2.2",
+	"0.2.1",
+	"0.2.0",
+	"0.1.2",
+	"0.1.1",
+	"0.1.0",
+] as const;
 
 export enum BuildType {
 	dockerfile = "dockerfile",
@@ -43,12 +123,7 @@ const buildTypeDisplayMap: Record<BuildType, string> = {
 const mySchema = z.discriminatedUnion("buildType", [
 	z.object({
 		buildType: z.literal(BuildType.dockerfile),
-		dockerfile: z
-			.string({
-				required_error: "Dockerfile path is required",
-				invalid_type_error: "Dockerfile path is required",
-			})
-			.min(1, "Dockerfile required"),
+		dockerfile: z.string().nullable().default(""),
 		dockerContextPath: z.string().nullable().default(""),
 		dockerBuildStage: z.string().nullable().default(""),
 	}),
@@ -62,10 +137,11 @@ const mySchema = z.discriminatedUnion("buildType", [
 	z.object({
 		buildType: z.literal(BuildType.nixpacks),
 		publishDirectory: z.string().optional(),
+		isStaticSpa: z.boolean().default(false),
 	}),
 	z.object({
 		buildType: z.literal(BuildType.railpack),
-		railpackVersion: z.string().nullable().default("0.2.2"),
+		railpackVersion: z.string().nullable().default("0.15.4"),
 	}),
 	z.object({
 		buildType: z.literal(BuildType.static),
@@ -112,6 +188,7 @@ const resetData = (data: ApplicationData): AddTemplate => {
 			return {
 				buildType: BuildType.nixpacks,
 				publishDirectory: data.publishDirectory || undefined,
+				isStaticSpa: data.isStaticSpa ?? false,
 			};
 		case BuildType.paketo_buildpacks:
 			return {
@@ -137,14 +214,14 @@ const resetData = (data: ApplicationData): AddTemplate => {
 };
 
 export const ShowBuildChooseForm = ({ applicationId }: Props) => {
-	const { mutateAsync, isLoading } =
+	const { mutateAsync, isPending } =
 		api.application.saveBuildType.useMutation();
 	const { data, refetch } = api.application.one.useQuery(
 		{ applicationId },
 		{ enabled: !!applicationId },
 	);
 
-	const form = useForm<AddTemplate>({
+	const form = useForm({
 		defaultValues: {
 			buildType: BuildType.nixpacks,
 		},
@@ -152,6 +229,9 @@ export const ShowBuildChooseForm = ({ applicationId }: Props) => {
 	});
 
 	const buildType = form.watch("buildType");
+	const railpackVersion = form.watch("railpackVersion");
+	const publishDirectory = form.watch("publishDirectory");
+	const [isManualRailpackVersion, setIsManualRailpackVersion] = useState(false);
 
 	useEffect(() => {
 		if (data) {
@@ -163,8 +243,21 @@ export const ShowBuildChooseForm = ({ applicationId }: Props) => {
 			};
 
 			form.reset(resetData(typedData));
+
+			// Check if railpack version is manual (not in the predefined list)
+			if (
+				data.railpackVersion &&
+				!RAILPACK_VERSIONS.includes(data.railpackVersion as any)
+			) {
+				setIsManualRailpackVersion(true);
+			}
 		}
 	}, [data, form]);
+
+	// Hide builder section when Docker provider is selected
+	if (data?.sourceType === "docker") {
+		return null;
+	}
 
 	const onSubmit = async (data: AddTemplate) => {
 		await mutateAsync({
@@ -183,10 +276,13 @@ export const ShowBuildChooseForm = ({ applicationId }: Props) => {
 					? data.herokuVersion
 					: null,
 			isStaticSpa:
-				data.buildType === BuildType.static ? data.isStaticSpa : null,
+				data.buildType === BuildType.static ||
+				data.buildType === BuildType.nixpacks
+					? data.isStaticSpa
+					: null,
 			railpackVersion:
 				data.buildType === BuildType.railpack
-					? data.railpackVersion || "0.2.2"
+					? data.railpackVersion || "0.15.4"
 					: null,
 		})
 			.then(async () => {
@@ -301,7 +397,7 @@ export const ShowBuildChooseForm = ({ applicationId }: Props) => {
 											<FormLabel>Docker File</FormLabel>
 											<FormControl>
 												<Input
-													placeholder="Path of your docker file"
+													placeholder="Path of your docker file (default: Dockerfile)"
 													{...field}
 													value={field.value ?? ""}
 												/>
@@ -378,6 +474,30 @@ export const ShowBuildChooseForm = ({ applicationId }: Props) => {
 								)}
 							/>
 						)}
+						{buildType === BuildType.nixpacks && publishDirectory && (
+							<FormField
+								control={form.control}
+								name="isStaticSpa"
+								render={({ field }) => (
+									<FormItem>
+										<FormControl>
+											<div className="flex items-center gap-x-2 p-2">
+												<Checkbox
+													id="checkboxIsStaticSpaNixpacks"
+													value={String(field.value)}
+													checked={field.value}
+													onCheckedChange={field.onChange}
+												/>
+												<FormLabel htmlFor="checkboxIsStaticSpaNixpacks">
+													Single Page Application (SPA)
+												</FormLabel>
+											</div>
+										</FormControl>
+										<FormMessage />
+									</FormItem>
+								)}
+							/>
+						)}
 						{buildType === BuildType.static && (
 							<FormField
 								control={form.control}
@@ -403,26 +523,91 @@ export const ShowBuildChooseForm = ({ applicationId }: Props) => {
 							/>
 						)}
 						{buildType === BuildType.railpack && (
-							<FormField
-								control={form.control}
-								name="railpackVersion"
-								render={({ field }) => (
-									<FormItem>
-										<FormLabel>Railpack Version</FormLabel>
-										<FormControl>
-											<Input
-												placeholder="Railpack Version"
-												{...field}
-												value={field.value ?? ""}
-											/>
-										</FormControl>
-										<FormMessage />
-									</FormItem>
-								)}
-							/>
+							<>
+								<FormField
+									control={form.control}
+									name="railpackVersion"
+									render={({ field }) => (
+										<FormItem>
+											<FormLabel>Railpack Version</FormLabel>
+											<FormControl>
+												{isManualRailpackVersion ? (
+													<div className="space-y-2">
+														<Input
+															placeholder="Enter custom version (e.g., 0.15.4)"
+															{...field}
+															value={field.value ?? ""}
+														/>
+														<Button
+															type="button"
+															variant="outline"
+															size="sm"
+															onClick={() => {
+																setIsManualRailpackVersion(false);
+																field.onChange("0.15.4");
+															}}
+														>
+															Use predefined versions
+														</Button>
+													</div>
+												) : (
+													<Select
+														onValueChange={(value) => {
+															if (value === "manual") {
+																setIsManualRailpackVersion(true);
+																field.onChange("");
+															} else {
+																field.onChange(value);
+															}
+														}}
+														value={field.value ?? "0.15.4"}
+													>
+														<SelectTrigger>
+															<SelectValue placeholder="Select Railpack version" />
+														</SelectTrigger>
+														<SelectContent>
+															<SelectItem value="manual">
+																<span className="font-medium">
+																	✏️ Manual (Custom Version)
+																</span>
+															</SelectItem>
+															{RAILPACK_VERSIONS.map((version) => (
+																<SelectItem key={version} value={version}>
+																	v{version}
+																	{version === "0.15.4" && (
+																		<Badge
+																			variant="secondary"
+																			className="ml-2 px-1 text-xs"
+																		>
+																			Latest
+																		</Badge>
+																	)}
+																</SelectItem>
+															))}
+														</SelectContent>
+													</Select>
+												)}
+											</FormControl>
+											<FormDescription>
+												Select a Railpack version or choose manual to enter a
+												custom version.{" "}
+												<a
+													href="https://github.com/railwayapp/railpack/releases"
+													target="_blank"
+													rel="noreferrer"
+													className="text-primary underline underline-offset-4"
+												>
+													View releases
+												</a>
+											</FormDescription>
+											<FormMessage />
+										</FormItem>
+									)}
+								/>
+							</>
 						)}
 						<div className="flex w-full justify-end">
-							<Button isLoading={isLoading} type="submit">
+							<Button isLoading={isPending} type="submit">
 								Save
 							</Button>
 						</div>

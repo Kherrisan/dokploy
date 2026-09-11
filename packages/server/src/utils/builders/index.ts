@@ -1,6 +1,8 @@
+import { resolveServiceNetworks } from "@dokploy/server/services/network";
+import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
-import { uploadImageRemoteCommand } from "../cluster/upload";
+import { getRegistryTag, uploadImageRemoteCommand } from "../cluster/upload";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -10,6 +12,7 @@ import {
 	prepareEnvironmentVariables,
 } from "../docker/utils";
 import { getRemoteDocker } from "../servers/remote-docker";
+import { withResolvedVaultRefs } from "../vault";
 import { getDockerCommand } from "./docker-file";
 import { getHerokuCommand } from "./heroku";
 import { getNixpacksCommand } from "./nixpacks";
@@ -28,48 +31,57 @@ export type ApplicationNested = InferResultType<
 		security: true;
 		redirects: true;
 		ports: true;
-		registry: true;
+		registry: { columns: { password: false } };
+		buildRegistry: { columns: { password: false } };
+		rollbackRegistry: { columns: { password: false } };
+		deployments: true;
 		environment: { with: { project: true } };
 	}
 >;
 
-export const getBuildCommand = (application: ApplicationNested) => {
+export const getBuildCommand = async (rawApplication: ApplicationNested) => {
+	const application = await withResolvedVaultRefs(rawApplication);
 	let command = "";
-	const { buildType, registry } = application;
 
-	if (application.sourceType === "docker") {
-		return "";
+	if (application.sourceType !== "docker") {
+		const { buildType } = application;
+		switch (buildType) {
+			case "nixpacks":
+				command = getNixpacksCommand(application);
+				break;
+			case "heroku_buildpacks":
+				command = getHerokuCommand(application);
+				break;
+			case "paketo_buildpacks":
+				command = getPaketoCommand(application);
+				break;
+			case "static":
+				command = getStaticCommand(application);
+				break;
+			case "dockerfile":
+				command = getDockerCommand(application);
+				break;
+			case "railpack":
+				command = getRailpackCommand(application);
+				break;
+		}
 	}
-	switch (buildType) {
-		case "nixpacks":
-			command = getNixpacksCommand(application);
-			break;
-		case "heroku_buildpacks":
-			command = getHerokuCommand(application);
-			break;
-		case "paketo_buildpacks":
-			command = getPaketoCommand(application);
-			break;
-		case "static":
-			command = getStaticCommand(application);
-			break;
-		case "dockerfile":
-			command = getDockerCommand(application);
-			break;
-		case "railpack":
-			command = getRailpackCommand(application);
-			break;
-	}
-	if (registry) {
-		command += uploadImageRemoteCommand(application);
+
+	if (
+		application.registry ||
+		application.buildRegistry ||
+		application.rollbackRegistry
+	) {
+		command += await uploadImageRemoteCommand(application);
 	}
 
 	return command;
 };
 
 export const mechanizeDockerContainer = async (
-	application: ApplicationNested,
+	rawApplication: ApplicationNested,
 ) => {
+	const application = await withResolvedVaultRefs(rawApplication);
 	const {
 		appName,
 		env,
@@ -79,6 +91,7 @@ export const mechanizeDockerContainer = async (
 		memoryReservation,
 		cpuReservation,
 		command,
+		args,
 		ports,
 	} = application;
 
@@ -91,6 +104,8 @@ export const mechanizeDockerContainer = async (
 
 	const volumesMount = generateVolumeMounts(mounts);
 
+	const resolvedNetworks = await resolveServiceNetworks(application);
+
 	const {
 		HealthCheck,
 		RestartPolicy,
@@ -99,9 +114,9 @@ export const mechanizeDockerContainer = async (
 		Mode,
 		RollbackConfig,
 		UpdateConfig,
-		Networks,
 		StopGracePeriod,
 		EndpointSpec,
+		Ulimits,
 	} = generateConfigContainer(application);
 
 	const bindsMount = generateBindMounts(mounts);
@@ -112,8 +127,8 @@ export const mechanizeDockerContainer = async (
 		application.environment.env,
 	);
 
-	const image = getImageName(application);
-	const authConfig = getAuthConfig(application);
+	const image = await getImageName(application);
+	const authConfig = await getAuthConfig(application);
 	const docker = await getRemoteDocker(application.serverId);
 
 	const settings: CreateServiceOptions = {
@@ -125,16 +140,19 @@ export const mechanizeDockerContainer = async (
 				Image: image,
 				Env: envVariables,
 				Mounts: [...volumesMount, ...bindsMount, ...filesMount],
-				...(StopGracePeriod && { StopGracePeriod }),
-				...(command
-					? {
-							Command: ["/bin/sh"],
-							Args: ["-c", command],
-						}
-					: {}),
+				...(StopGracePeriod !== null &&
+					StopGracePeriod !== undefined && { StopGracePeriod }),
+				...(command && {
+					Command: command.split(" "),
+				}),
+				...(args &&
+					args.length > 0 && {
+						Args: args,
+					}),
+				...(Ulimits && { Ulimits }),
 				Labels,
 			},
-			Networks,
+			Networks: resolvedNetworks,
 			RestartPolicy,
 			Placement,
 			Resources: {
@@ -168,45 +186,63 @@ export const mechanizeDockerContainer = async (
 				ForceUpdate: inspect.Spec.TaskTemplate.ForceUpdate + 1,
 			},
 		});
-	} catch {
-		await docker.createService(settings);
+	} catch (error) {
+		console.log(error);
+		if (authConfig) {
+			await docker.createService(authConfig, settings);
+		} else {
+			await docker.createService(settings);
+		}
 	}
 };
 
-const getImageName = (application: ApplicationNested) => {
-	const { appName, sourceType, dockerImage, registry } = application;
+const getImageName = async (application: ApplicationNested) => {
+	const { appName, sourceType, dockerImage, registry, buildRegistry } =
+		application;
 	const imageName = `${appName}:latest`;
 	if (sourceType === "docker") {
 		return dockerImage || "ERROR-NO-IMAGE-PROVIDED";
 	}
 
 	if (registry) {
-		const { registryUrl, imagePrefix, username } = registry;
-		const registryTag = imagePrefix
-			? `${registryUrl ? `${registryUrl}/` : ""}${imagePrefix}/${imageName}`
-			: `${registryUrl ? `${registryUrl}/` : ""}${username}/${imageName}`;
-		return registryTag;
+		const r = await findRegistryByIdWithCredentials(registry.registryId);
+		return getRegistryTag(r, imageName);
+	}
+	if (buildRegistry) {
+		const r = await findRegistryByIdWithCredentials(buildRegistry.registryId);
+		return getRegistryTag(r, imageName);
 	}
 
 	return imageName;
 };
 
-export const getAuthConfig = (application: ApplicationNested) => {
-	const { registry, username, password, sourceType, registryUrl } = application;
+export const getAuthConfig = async (application: ApplicationNested) => {
+	const {
+		registry,
+		buildRegistry,
+		username,
+		password,
+		sourceType,
+		registryUrl,
+	} = application;
 
 	if (sourceType === "docker") {
 		if (username && password) {
-			return {
-				password,
-				username,
-				serveraddress: registryUrl || "",
-			};
+			return { password, username, serveraddress: registryUrl || "" };
 		}
 	} else if (registry) {
+		const r = await findRegistryByIdWithCredentials(registry.registryId);
 		return {
-			password: registry.password,
-			username: registry.username,
-			serveraddress: registry.registryUrl,
+			password: r.password,
+			username: r.username,
+			serveraddress: r.registryUrl,
+		};
+	} else if (buildRegistry) {
+		const r = await findRegistryByIdWithCredentials(buildRegistry.registryId);
+		return {
+			password: r.password,
+			username: r.username,
+			serveraddress: r.registryUrl,
 		};
 	}
 

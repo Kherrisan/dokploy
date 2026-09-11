@@ -32,7 +32,7 @@ import { api } from "@/utils/api";
 import { AddInvitation } from "./add-invitation";
 
 export const ShowInvitations = () => {
-	const { data, isLoading, refetch } =
+	const { data, isPending, refetch } =
 		api.organization.allInvitations.useQuery();
 
 	const { mutateAsync: removeInvitation } =
@@ -40,7 +40,7 @@ export const ShowInvitations = () => {
 
 	return (
 		<div className="w-full">
-			<Card className="h-full bg-sidebar  p-2.5 rounded-xl  max-w-5xl mx-auto">
+			<Card className="h-full bg-sidebar  p-2.5 rounded-xl w-full">
 				<div className="rounded-xl bg-background shadow-md ">
 					<CardHeader className="">
 						<CardTitle className="text-xl flex flex-row gap-2">
@@ -52,7 +52,7 @@ export const ShowInvitations = () => {
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="space-y-2 py-8 border-t">
-						{isLoading ? (
+						{isPending ? (
 							<div className="flex flex-row gap-2 items-center justify-center text-sm text-muted-foreground min-h-[25vh]">
 								<span>Loading...</span>
 								<Loader2 className="animate-spin size-4" />

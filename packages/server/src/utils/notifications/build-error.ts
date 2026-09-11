@@ -1,16 +1,21 @@
 import { db } from "@dokploy/server/db";
 import { notifications } from "@dokploy/server/db/schema";
 import BuildFailedEmail from "@dokploy/server/emails/emails/build-failed";
-import { renderAsync } from "@react-email/components";
+import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
 import {
+	sendCustomNotification,
 	sendDiscordNotification,
 	sendEmailNotification,
 	sendGotifyNotification,
 	sendLarkNotification,
+	sendMattermostNotification,
 	sendNtfyNotification,
+	sendPushoverNotification,
+	sendResendNotification,
 	sendSlackNotification,
+	sendTeamsNotification,
 	sendTelegramNotification,
 } from "./utils";
 
@@ -43,18 +48,35 @@ export const sendBuildErrorNotifications = async ({
 			discord: true,
 			telegram: true,
 			slack: true,
+			resend: true,
 			gotify: true,
 			ntfy: true,
+			mattermost: true,
+			custom: true,
 			lark: true,
+			pushover: true,
+			teams: true,
 		},
 	});
 
 	for (const notification of notificationList) {
-		const { email, discord, telegram, slack, gotify, ntfy, lark } =
-			notification;
+		const {
+			email,
+			resend,
+			discord,
+			telegram,
+			slack,
+			gotify,
+			ntfy,
+			mattermost,
+			custom,
+			lark,
+			pushover,
+			teams,
+		} = notification;
 		try {
-			if (email) {
-				const template = await renderAsync(
+			if (email || resend) {
+				const template = await render(
 					BuildFailedEmail({
 						projectName,
 						applicationName,
@@ -64,11 +86,22 @@ export const sendBuildErrorNotifications = async ({
 						date: date.toLocaleString(),
 					}),
 				).catch();
-				await sendEmailNotification(
-					email,
-					"Build failed for dokploy",
-					template,
-				);
+
+				if (email) {
+					await sendEmailNotification(
+						email,
+						"Build failed for dokploy",
+						template,
+					);
+				}
+
+				if (resend) {
+					await sendResendNotification(
+						resend,
+						"Build failed for dokploy",
+						template,
+					);
+				}
 			}
 
 			if (discord) {
@@ -207,16 +240,51 @@ export const sendBuildErrorNotifications = async ({
 									value: `\`\`\`${errorMessage}\`\`\``,
 									short: false,
 								},
-							],
-							actions: [
 								{
-									type: "button",
-									text: "View Build Details",
-									url: buildLink,
+									title: "Details",
+									value: `<${buildLink}|View Build Details>`,
+									short: false,
 								},
 							],
+							mrkdwn_in: ["fields"],
 						},
 					],
+				});
+			}
+
+			if (mattermost) {
+				await sendMattermostNotification(mattermost, {
+					text: `:warning: **Build Failed**
+
+**Project:** ${projectName}
+**Application:** ${applicationName}
+**Type:** ${applicationType}
+**Time:** ${date.toLocaleString()}
+
+**Error:**
+\`\`\`
+${errorMessage}
+\`\`\`
+
+[View Build Details](${buildLink})`,
+					channel: mattermost.channel,
+					username: mattermost.username || "Dokploy Bot",
+				});
+			}
+
+			if (custom) {
+				await sendCustomNotification(custom, {
+					title: "Build Error",
+					message: "Build failed with errors",
+					projectName,
+					applicationName,
+					applicationType,
+					errorMessage,
+					buildLink,
+					timestamp: date.toISOString(),
+					date: date.toLocaleString(),
+					status: "error",
+					type: "build",
 				});
 			}
 
@@ -328,6 +396,34 @@ export const sendBuildErrorNotifications = async ({
 								},
 							],
 						},
+					},
+				});
+			}
+
+			if (pushover) {
+				await sendPushoverNotification(
+					pushover,
+					"Build Failed",
+					`Project: ${projectName}\nApplication: ${applicationName}\nType: ${applicationType}\nDate: ${date.toLocaleString()}\nError: ${errorMessage}`,
+				);
+			}
+
+			if (teams) {
+				const limitCharacter = 800;
+				const truncatedErrorMessage = errorMessage.substring(0, limitCharacter);
+				await sendTeamsNotification(teams, {
+					title: "⚠️ Build Failed",
+					facts: [
+						{ name: "Project", value: projectName },
+						{ name: "Application", value: applicationName },
+						{ name: "Type", value: applicationType },
+						{ name: "Date", value: format(date, "PP pp") },
+						{ name: "Error Message", value: truncatedErrorMessage },
+					],
+					potentialAction: {
+						type: "Action.OpenUrl",
+						title: "View Build Details",
+						url: buildLink,
 					},
 				});
 			}
